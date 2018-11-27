@@ -8,7 +8,7 @@ and the authors of this benchmark suite provided CSV files here:
 
 <https://github.com/thelmuth/Program-Synthesis-Benchmark-Data>
 
-which were used in the MAKESPEARE paper.  As an example, to convert the Collatz Numbers CSV from the above github repository, to the TSV format required by MAKESPEARE:
+which were used in the MAKESPEARE paper.  As an example, to convert the Collatz Numbers CSV from the above github repository to the TSV format required by MAKESPEARE:
 
 ```
 perl converter-synthesis-suite.pl < examples-collatz-numbers.csv > collatz-numbers.tsv
