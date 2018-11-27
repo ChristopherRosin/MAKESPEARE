@@ -1,0 +1,375 @@
+// Copyright 2018 Christopher D. Rosin
+// This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+// You should have received a copy of the GNU General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+#include <stdint.h>
+#include <sys/mman.h>
+
+#define NUMINSTRUCTIONS 32 // number of slots
+#define NUMIMMEDIATECONSTANTS 4
+#define NUMREGISTERS 6
+#define VBITS 4            // "V" for operands
+#define VMASK ((0x1<<VBITS)-1)
+#define OBITS 4            // "O" for opcodes
+#define OVALS 14           // must be <= 2^OBITS.  And must match the number of opcodes defined and handled below.
+#define OLMASK ((0x1<<OBITS)-1)
+#define OMASK (OLMASK<<VBITS)
+#define MAXCODES (0x1<<(OBITS+VBITS))
+#define ARCHREG 16
+
+int IVALS; // must call setupdata to set
+int VVALS; // must call setupdata to set
+
+enum opcodes {MOV,ADD,SUB,IMUL,SHR,SHL,CMP,TEST,INC,ARG,JMP,JZ,JNZ,JG};
+const char* oname[] = {"MOV","ADD","SUB","IMUL","SHR","SHL","CMP","TEST","INC","ARG","JMP","JZ","JNZ","JG"};
+char istr[MAXCODES][14];
+
+#define N ARG
+
+#define Dst &state
+
+const int immediateconstants[NUMIMMEDIATECONSTANTS] = {0,1,2,3};
+const int registers[NUMREGISTERS] = {7,6,2,0,8,9};  // calling-convention registers, except r1 is needed elsewhere and so replaced by r0 (which is also return value)
+
+|.arch x64
+|.actionlist actions
+|.define LOOPCOUNTREG, r15
+|.define LOOPCOUNTLOCATIONREG, r11
+|.define MEMBASEREG, r10
+|.define MEMBOUNDREG, r14
+
+|.macro loopcountboundcheck
+  ||	if(flagsunneeded[jumptargetoperand]==0) {
+	  | pushf
+	  | sub LOOPCOUNTREG,1
+	  | jz =>(NUMINSTRUCTIONS+1)
+	  | popf
+	  | jmp =>(jumptargetoperand)
+  ||	} else {
+	  | sub LOOPCOUNTREG,1
+	  | jg =>(jumptargetoperand)
+	  | jmp =>(NUMINSTRUCTIONS+2)
+  ||    }
+|.endmacro
+
+|.macro memboundcheck, arg1
+  ||	  if(boundschecked[arg1]==0) {
+  ||        if(flagsunneeded[i]==0) {
+	      | pushf
+              | cmp Rq(arg1),MEMBOUNDREG
+              | jae =>(NUMINSTRUCTIONS+1)
+	      | popf
+  ||	    } else {
+              | cmp Rq(arg1),MEMBOUNDREG
+              | jae =>(NUMINSTRUCTIONS+2)
+  ||	    }
+  ||	    boundschecked[arg1] = 1;
+  ||	  }
+|.endmacro
+
+|.macro finishup
+  | mov [LOOPCOUNTLOCATIONREG],LOOPCOUNTREG
+  | pop r15
+  | pop r14
+  | ret
+|.endmacro
+
+
+void *softasm(int codes[NUMINSTRUCTIONS]) {
+  dasm_State *state;
+  dasm_init(&state, 1);
+  dasm_setup(&state, actions);  
+
+  int destreg = 0;   // default ARG. 
+  int desttype = 0;  // 0 == reg, 1 == mem.
+
+  // temporarily pop, then restore stack
+  |  pop r0  
+  |  pop MEMBASEREG
+  |  pop LOOPCOUNTLOCATIONREG
+  |  push LOOPCOUNTLOCATIONREG
+  |  push MEMBASEREG
+  |  push r0
+  |  push r14
+  |  push r15
+  |  mov MEMBOUNDREG,r6
+  |  add MEMBOUNDREG,1
+  |  mov LOOPCOUNTREG,[LOOPCOUNTLOCATIONREG]
+  |  mov r0,r1
+  |  xor r1,r1
+  // Final xor clears flags to a known state.
+
+  dasm_growpc(&state, NUMINSTRUCTIONS+3);
+
+  int boundschecked[ARCHREG];
+  for(int i=0;i<NUMREGISTERS;i++) boundschecked[registers[i]] = 0;
+  int jumptarget[NUMINSTRUCTIONS];
+  for(int i=0;i<NUMINSTRUCTIONS;i++) jumptarget[i]=0;
+  for(int i=0;i<NUMINSTRUCTIONS;i++) {
+    int instr = codes[i]>>VBITS;
+    if((instr>=JMP)&&(instr<=JG)) {
+      jumptarget[((codes[i])&VMASK)*(NUMINSTRUCTIONS/VVALS)] = 1;
+  } }
+  int flagsunneeded[NUMINSTRUCTIONS];
+  int instr = codes[NUMINSTRUCTIONS-1]>>VBITS;
+  if((instr>=JMP)&&(instr<=JG)) flagsunneeded[NUMINSTRUCTIONS-1]=0;
+    else flagsunneeded[NUMINSTRUCTIONS-1]=1;  
+  for(int i=NUMINSTRUCTIONS-2;i>=0;i--) {
+    int instr = codes[i]>>VBITS;
+    if((instr>=JMP)&&(instr<=JG)) flagsunneeded[i] = 0;
+      else if(flagsunneeded[i+1]) flagsunneeded[i] = 1;
+      else if((instr==MOV)||(instr==SHR)||(instr==SHL)||(instr==IMUL)||(instr==ARG)||((instr==INC)&&((codes[i]&VMASK)<NUMIMMEDIATECONSTANTS))) flagsunneeded[i] = 0;
+      else flagsunneeded[i] = 1;
+  }
+
+  for(int i=0;i<NUMINSTRUCTIONS;i++) {
+    |=> (i):
+    int code = codes[i];
+    int instr = code>>VBITS;
+    int operand = code&VMASK;
+    int origoperand = operand;
+    int jumptargetoperand = operand*(NUMINSTRUCTIONS/VVALS);
+
+    if(jumptarget[i]) {
+      for(int j=0;j<NUMREGISTERS;j++) boundschecked[registers[j]] = 0;
+    }
+
+    if(instr==ARG) { // pseudoinstruction; generates no code
+      if(origoperand>=NUMIMMEDIATECONSTANTS) { // otherwise ignore, with no effect
+	if(operand-NUMIMMEDIATECONSTANTS<NUMREGISTERS) {
+	  destreg = registers[operand-NUMIMMEDIATECONSTANTS];
+	  desttype = 0;
+	} else {
+	  destreg = registers[operand-NUMIMMEDIATECONSTANTS-NUMREGISTERS];
+	  desttype = 1;
+      } }
+    } else if(instr==JMP) {
+      if(jumptargetoperand<=i) { // backjump
+        | loopcountboundcheck
+       } else {
+        | jmp =>(jumptargetoperand)
+       }
+    } else if(instr==JZ) {
+      if(jumptargetoperand<=i) { // backjump
+	| jnz =>(i+1)
+	| loopcountboundcheck
+      } else {
+        | jz =>(jumptargetoperand)
+      }
+    } else if(instr==JNZ) {
+      if(jumptargetoperand<=i) { // backjump
+	| jz =>(i+1)
+	| loopcountboundcheck
+      } else {
+        | jnz =>(jumptargetoperand)
+      }
+    } else if(instr==JG) {
+      if(jumptargetoperand<=i) { // backjump
+	| jle =>(i+1)
+	| loopcountboundcheck
+      } else {
+        | jg =>(jumptargetoperand)
+      }
+    } else { 
+      int constflag = 0;
+      int memflag = 0;
+      if(operand<NUMIMMEDIATECONSTANTS) {
+	constflag = 1;
+	operand = immediateconstants[operand];
+      } else if(operand-NUMIMMEDIATECONSTANTS<NUMREGISTERS) {
+	operand = registers[operand-NUMIMMEDIATECONSTANTS];
+      } else {
+	operand = registers[operand-NUMIMMEDIATECONSTANTS-NUMREGISTERS];
+	memflag = 1;
+      }
+      if(instr==INC) { // Special case; INC uses operand as destination.
+	if(constflag==0) { // const destination is ignored; generate no code in that case.
+	  if(memflag==0) {
+  	    | add Rq(operand),1
+	    boundschecked[operand] = 0;
+          } else {
+	    | memboundcheck operand
+            | add qword [MEMBASEREG + Rq(operand)*8],1
+        } }
+      } else if(desttype==0) {  // reg destination 
+	if(constflag==1) { 
+  	  if(instr==MOV) {
+	    | mov Rq(destreg),operand
+	    boundschecked[destreg] = 0;
+          } else if(instr==ADD) {
+  	    | add Rq(destreg),operand
+	    if(operand!=0) boundschecked[destreg] = 0;
+	  } else if(instr==SUB) {
+	    | sub Rq(destreg),operand
+	    if(operand!=0) boundschecked[destreg] = 0;	    
+	  } else if(instr==IMUL) {
+	    | imul Rq(destreg),operand
+	    if(operand!=1) boundschecked[destreg] = 0;	    
+	  } else if(instr==SHR) {
+	    | shr Rq(destreg),operand
+	    if(operand!=0) boundschecked[destreg] = 0;	    
+	  } else if(instr==SHL) {
+	    | shl Rq(destreg),operand
+	    if(operand!=0) boundschecked[destreg] = 0;	    	    
+          } else if(instr==CMP) {
+	    | cmp Rq(destreg),operand
+	  } else if(instr==TEST) {
+	    | test Rq(destreg),operand
+	  }
+	} else if(memflag==0) {
+	  if(instr==MOV) {
+	    | mov Rq(destreg),Rq(operand)
+	    boundschecked[destreg] = boundschecked[operand];
+	  } else if(instr==ADD) {
+ 	    | add Rq(destreg),Rq(operand)
+	    boundschecked[destreg] = 0;	    
+	  } else if(instr==SUB) {
+	    | sub Rq(destreg),Rq(operand)
+	    boundschecked[destreg] = 0;	    
+	  } else if(instr==IMUL) {
+	    | imul Rq(destreg),Rq(operand)
+	    boundschecked[destreg] = 0;	    
+	  } else if(instr==SHR) {
+	    | mov r1,Rq(operand)
+	    | shr Rq(destreg),cl
+	    boundschecked[destreg] = 0;	    
+	  } else if(instr==SHL) {
+	    | mov r1,Rq(operand)
+	    | shl Rq(destreg),cl
+	    boundschecked[destreg] = 0;	    
+	  } else if(instr==CMP) {
+	    | cmp Rq(destreg),Rq(operand)
+	  } else if(instr==TEST) {
+	    | test Rq(destreg),Rq(operand)
+	  }
+        } else { // memflag==1
+	  | memboundcheck operand
+	  if(instr==MOV) {
+	    | mov Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==ADD) {
+	    | add Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==SUB) {
+	    | sub Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==IMUL) {
+	    | imul Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==SHR) {
+	    | mov r1,[MEMBASEREG + Rq(operand)*8]
+            | shr Rq(destreg),cl
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==SHL) {
+	    | mov r1,[MEMBASEREG + Rq(operand)*8]
+            | shl Rq(destreg),cl
+	    boundschecked[destreg] = 0;	    	    
+	  } else if(instr==CMP) {
+	    | cmp Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	  } else if(instr==TEST) {
+	    | test Rq(destreg),[MEMBASEREG + Rq(operand)*8]
+	} }
+      } else { // desttype==1
+        | memboundcheck destreg
+	if(constflag==1) { 
+  	  if(instr==MOV) {
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],operand
+          } else if(instr==ADD) {
+  	    | add qword [MEMBASEREG + Rq(destreg)*8],operand
+	  } else if(instr==SUB) {
+	    | sub qword [MEMBASEREG + Rq(destreg)*8],operand
+	  } else if(instr==IMUL) {
+	    | mov r1,operand
+	    | imul r1,[MEMBASEREG + Rq(destreg)*8]
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],r1
+	  } else if(instr==SHR) {
+	    | shr qword [MEMBASEREG + Rq(destreg)*8],operand
+	  } else if(instr==SHL) {
+	    | shl qword [MEMBASEREG + Rq(destreg)*8],operand
+          } else if(instr==CMP) {
+	    | cmp qword [MEMBASEREG + Rq(destreg)*8],operand
+	  } else if(instr==TEST) {
+	    | test qword [MEMBASEREG + Rq(destreg)*8],operand
+	  }
+	} else if(memflag==0) {
+	  if(instr==MOV) {
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],Rq(operand)
+	  } else if(instr==ADD) {
+ 	    | add qword [MEMBASEREG + Rq(destreg)*8],Rq(operand)
+	  } else if(instr==SUB) {
+	    | sub qword [MEMBASEREG + Rq(destreg)*8],Rq(operand)
+	  } else if(instr==IMUL) {
+	    | mov r1,Rq(operand)
+	    | imul r1,[MEMBASEREG + Rq(destreg)*8]
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],r1	    
+	  } else if(instr==SHR) {
+	    | mov r1,Rq(operand)
+	    | shr qword [MEMBASEREG + Rq(destreg)*8],cl
+	  } else if(instr==SHL) {
+	    | mov r1,Rq(operand)
+	    | shl qword [MEMBASEREG + Rq(destreg)*8],cl
+	  } else if(instr==CMP) {
+	    | cmp qword [MEMBASEREG + Rq(destreg)*8],Rq(operand)
+	  } else if(instr==TEST) {
+	    | test qword [MEMBASEREG + Rq(destreg)*8],Rq(operand)
+	  }
+        } else { // memflag==1
+	  | memboundcheck operand
+	  | mov r1,[MEMBASEREG + Rq(operand)*8]
+	  if(instr==MOV) {
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],r1
+	  } else if(instr==ADD) {
+	    | add qword [MEMBASEREG + Rq(destreg)*8],r1
+	  } else if(instr==SUB) {
+	    | sub qword [MEMBASEREG + Rq(destreg)*8],r1
+	  } else if(instr==IMUL) {
+	    | imul r1,[MEMBASEREG + Rq(destreg)*8]
+	    | mov qword [MEMBASEREG + Rq(destreg)*8],r1	    	    
+	  } else if(instr==SHR) {
+            | shr qword [MEMBASEREG + Rq(destreg)*8],cl
+	  } else if(instr==SHL) {
+            | shl qword [MEMBASEREG + Rq(destreg)*8],cl
+	  } else if(instr==CMP) {
+	    | cmp qword [MEMBASEREG + Rq(destreg)*8],r1
+	  } else if(instr==TEST) {
+	    | test qword [MEMBASEREG + Rq(destreg)*8],r1
+  } } } } }
+
+  |=> (NUMINSTRUCTIONS):
+  |  finishup
+
+  // bounds violation; mark it with neg loopcount (though if it was loopcount bound violation, then loopcount is zero anyway).  Need to popf the pushed condition flags.
+  |=> (NUMINSTRUCTIONS+1):
+  |  popf
+  |  neg LOOPCOUNTREG
+  |  finishup
+
+  // bounds violation, but no popf needed.
+  |=> (NUMINSTRUCTIONS+2):
+  |  neg LOOPCOUNTREG
+  |  finishup
+
+  size_t size;
+  dasm_link(&state, &size);
+  char *m = mmap(NULL, size + sizeof(size_t),PROT_READ | PROT_WRITE,MAP_ANON | MAP_PRIVATE, -1, 0);
+  *(size_t*)m = size;
+  void *f = m + sizeof(size_t);
+  dasm_encode(&state, f);
+  dasm_free(&state);
+  mprotect(m, size, PROT_EXEC | PROT_READ);
+
+  return(f);
+}
+
+long long int (*fptr)(long long int r0,long long int r1,long long int r2,long long int r3,long long int r4,long long int r5,long long int *p,long long int *q);
+
+void softasm_setup(int codes[NUMINSTRUCTIONS]) {
+  fptr = softasm(codes);
+  if(fptr==NULL) ERROREXIT("FATAL ERROR: fptr %d...\n",codes[0]);
+}
+
+void softasm_cleanup() {
+  void *m = (char *)fptr - sizeof(size_t);
+  munmap(m, *(size_t*)m);
+}	    

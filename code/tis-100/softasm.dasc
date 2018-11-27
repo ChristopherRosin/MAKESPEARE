@@ -1,0 +1,273 @@
+// Copyright 2018 Christopher D. Rosin
+// This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+// You should have received a copy of the GNU General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+#include <stdint.h>
+#include <sys/mman.h>
+
+#define MAXX 30
+#define MAXY 18
+#define XBITS 5  // MAXX must be <=2^XBITS.  And the image arrays passed in must be [MAXY][2^XBITS] 
+#define MAXXDIM (0x1<<XBITS)
+
+#define TARGETSCORE (MAXX*MAXY)
+
+#define NUMINSTRUCTIONS 15           // number of slots
+#define NUMIMMEDIATECONSTANTS 401    // 1999 for full range
+#define IMMEDIATECONSTANTOFFSET (-(NUMIMMEDIATECONSTANTS>>1))  // all operands are immediate constants
+#define VVALS NUMIMMEDIATECONSTANTS  // "V" for operands
+#define VMASK ((0x1<<VBITS)-1)
+#define OBITS 4                      // "O" for opcodes
+#define OVALS 16                     // must be <= 2^OBITS.  And must match the number of opcodes defined and handled below.
+#define OLMASK ((0x1<<OBITS)-1)
+#define OMASK ((OLMASK)<<VBITS)
+#define IVALS (0x1<<(OBITS+VBITS)) 
+#define MAXCODES (0x1<<(OBITS+VBITS))
+#define MAXMAXCODES (0x1<<16)
+int VBITS;
+
+enum opcodes {NOP,MOVAD,MOVCD,MOVCA,SWP,SAV,NEG,ADDC,ADDA,SUBC,SUBA,JMP,JEZ,JNZ,JGZ,JLZ};
+const char* oname[] = {"NOP","MOV","MOV","MOV","SWP","SAV","NEG","ADD","ADD","SUB","SUB","JMP","JEZ","JNZ","JGZ","JLZ"};
+char istr[MAXMAXCODES][14];
+
+#define N NOP
+
+// Store needed constants in unused locations in the image memory.
+#define CONSTLOC999 (30*8)
+#define CONSTLOCNEG999 (31*8)
+#define CONSTLOC0 (62*8)
+#define CONSTLOC1 (63*8)
+#define CONSTLOC2 (94*8)
+
+#define Dst &state
+
+|.arch x64
+|.actionlist actions
+|.define CYCLECOUNTREG, r10
+|.define CYCLECOUNTLOCATIONREG, r7
+|.define ACC, r14
+|.define BAK, r13
+|.define TMP, r1
+|.define TMPB,r3    
+|.define BESTSCORE, r0
+|.define CURSCORE, r11
+|.define IMGCURX, r8
+|.define IMGCURY, r9
+|.define IMGCURSTATE, r12
+|.define IMGCURINDEX, r15    
+|.define IMGLOCATIONREG, r6
+|.define TARGETLOCATIONREG, r2
+    
+// IMGCURSTATE 0 = ready to receive x, 1 = ready to receive y, 2 = ready to receive color 
+// Note BESTSCORE is the return value, and r1 passes in the problem-specific initial score for the initial all-0 image.
+    
+void *softasm(int codes[NUMINSTRUCTIONS]) {
+  dasm_State *state;
+  dasm_init(&state, 1);
+  dasm_setup(&state, actions);  
+
+  |  push r3
+  |  push r12  
+  |  push r13
+  |  push r14
+  |  push r15  
+  |  mov CYCLECOUNTREG,[CYCLECOUNTLOCATIONREG]
+  |  mov qword [IMGLOCATIONREG+CONSTLOC0],0
+  |  mov qword [IMGLOCATIONREG+CONSTLOC1],1
+  |  mov qword [IMGLOCATIONREG+CONSTLOC2],2
+  |  mov qword [IMGLOCATIONREG+CONSTLOC999],999
+  |  mov qword [IMGLOCATIONREG+CONSTLOCNEG999],-999
+  |  xor ACC,ACC
+  |  xor BAK,BAK
+  |  mov CURSCORE,r1
+  |  mov BESTSCORE,r1  
+  |  xor IMGCURSTATE,IMGCURSTATE
+  |  xor TMP,TMP
+
+  dasm_growpc(&state, NUMINSTRUCTIONS+3);
+
+  int nonnopflag = 0;
+  for(int i=0;i<NUMINSTRUCTIONS;i++) {
+    |=> (i):
+    int code = codes[i];
+    int instr = code>>VBITS;
+    int operand = code&VMASK;
+    int origoperand = operand;
+    int jumptargetoperand = ((double) origoperand)*((double) (((double) NUMINSTRUCTIONS)/((double) VVALS)));
+    if(jumptargetoperand<0) {
+      jumptargetoperand = 0;
+    }
+    if(jumptargetoperand>=NUMINSTRUCTIONS) {
+      jumptargetoperand = NUMINSTRUCTIONS-1;
+    }
+    operand = operand + IMMEDIATECONSTANTOFFSET;
+
+    if(instr==NOP) { // pseudoinstruction; generates no code and uses no cycles
+    } else {
+      nonnopflag = 1;
+      // most instructions use 1 cycle
+      | sub CYCLECOUNTREG,1
+      | jle =>(NUMINSTRUCTIONS+2)
+
+      if(instr==JMP) {
+        | jmp =>(jumptargetoperand)
+      } else if(instr==JEZ) {
+        | cmp ACC,0
+        | jz =>(jumptargetoperand)
+      } else if(instr==JNZ) {
+        | cmp ACC,0
+        | jnz =>(jumptargetoperand)
+      } else if(instr==JGZ) {
+        | cmp ACC,0
+        | jg =>(jumptargetoperand)
+      } else if(instr==JLZ) {
+        | cmp ACC,0
+        | jl =>(jumptargetoperand)
+      } else if(instr==SWP) {
+        | mov TMP,ACC
+	| mov ACC,BAK
+	| mov BAK,TMP
+      } else if(instr==SAV) {	   
+	| mov BAK,ACC
+      } else if(instr==NEG) {	   
+	| neg ACC
+      } else if(instr==ADDC) {	   
+        | add ACC,operand
+        // saturate at +/- 999
+	| cmp ACC,999
+	| cmovg ACC,[IMGLOCATIONREG+CONSTLOC999]
+	| cmp ACC,-999
+	| cmovl ACC,[IMGLOCATIONREG+CONSTLOCNEG999]
+      } else if(instr==ADDA) {	   
+        | add ACC,ACC
+        // saturate at +/- 999
+	| cmp ACC,999
+	| cmovg ACC,[IMGLOCATIONREG+CONSTLOC999]
+	| cmp ACC,-999
+	| cmovl ACC,[IMGLOCATIONREG+CONSTLOCNEG999]
+      } else if(instr==SUBC) {	   
+        | sub ACC,operand
+        // saturate at +/- 999
+	| cmp ACC,999
+	| cmovg ACC,[IMGLOCATIONREG+CONSTLOC999]
+	| cmp ACC,-999
+	| cmovl ACC,[IMGLOCATIONREG+CONSTLOCNEG999]
+      } else if(instr==SUBA) {	// zeroes ACC
+        | mov ACC,0
+      } else if(instr==MOVCA) {	
+        | mov ACC,operand
+      } else if((instr==MOVAD)||(instr==MOVCD)) {
+        if(instr==MOVAD) {
+          | mov TMP,ACC
+        } else {
+          | mov TMP,operand
+        }
+        // these instructions use an extra cycle
+        | sub CYCLECOUNTREG,1
+        | jle =>(NUMINSTRUCTIONS+2)
+
+        | cmp TMP,0
+	| cmovl IMGCURSTATE,[IMGLOCATIONREG+CONSTLOC0]
+	| jl =>(i+1)
+
+	| cmp IMGCURSTATE,0
+	| cmove IMGCURX,TMP
+        | cmove IMGCURSTATE,[IMGLOCATIONREG+CONSTLOC1]
+	| je =>(i+1)
+
+	| cmp IMGCURSTATE,1
+	| cmove IMGCURY,TMP
+	| cmove IMGCURSTATE,[IMGLOCATIONREG+CONSTLOC2]
+	| je =>(i+1)
+
+        // Otherwise CURSTATE is 2.
+	// Remaining case is nonnegative and is color.  First check if coordinates are out of window, in which case we ignore.
+	| cmp IMGCURX,MAXX
+        | jae =>(i+1)
+	| cmp IMGCURY,MAXY
+        | jae =>(i+1)
+	  
+	| cmp TMP,4
+	| cmovg TMP,[IMGLOCATIONREG+CONSTLOC0]
+	  
+	| mov IMGCURINDEX,IMGCURY
+	| shl IMGCURINDEX,XBITS
+	| or IMGCURINDEX,IMGCURX
+
+	| add IMGCURX,1
+	  
+	| cmp TMP,[IMGLOCATIONREG+IMGCURINDEX*8]
+	| jz =>(i+1)
+	  
+	| mov TMPB,0
+	| cmp TMP,[TARGETLOCATIONREG+IMGCURINDEX*8]
+	| cmove TMPB,[IMGLOCATIONREG+CONSTLOC1]
+	| add CURSCORE,TMPB
+	| mov TMPB,[IMGLOCATIONREG+IMGCURINDEX*8]
+        | mov [IMGLOCATIONREG+IMGCURINDEX*8],TMP
+	| mov TMP,0
+	| cmp TMPB,[TARGETLOCATIONREG+IMGCURINDEX*8]
+	| cmove TMP,[IMGLOCATIONREG+CONSTLOC1]
+	| sub CURSCORE,TMP
+	  
+	| cmp CURSCORE,BESTSCORE
+	| jle =>(i+1)
+        | mov BESTSCORE,CURSCORE
+	| cmp BESTSCORE,TARGETSCORE
+	| je =>(NUMINSTRUCTIONS+1)
+      } else {
+        ERROREXIT("FATAL ERROR: bad instr %d %d\n",instr,code);
+  } } }
+
+  if(nonnopflag) { // otherwise the jmp will loop infinitely 
+    // last instruction: loop back to start
+    |=> (NUMINSTRUCTIONS):
+    | jmp =>(0)
+  
+    // Success exit
+    |=> (NUMINSTRUCTIONS+1):
+    |  mov [CYCLECOUNTLOCATIONREG],CYCLECOUNTREG
+    |  pop r15
+    |  pop r14    
+    |  pop r13
+    |  pop r12
+    |  pop r3    
+    |  ret
+  }
+
+  // Time limit exceeded exit
+  |=> (NUMINSTRUCTIONS+2):
+  |  mov [CYCLECOUNTLOCATIONREG],CYCLECOUNTREG
+  |  pop r15
+  |  pop r14    
+  |  pop r13
+  |  pop r12
+  |  pop r3    
+  |  ret  
+
+  size_t size;
+  dasm_link(&state, &size);
+  char *m = mmap(NULL, size + sizeof(size_t),PROT_READ | PROT_WRITE,MAP_ANON | MAP_PRIVATE, -1, 0);
+  *(size_t*)m = size;
+  void *f = m + sizeof(size_t);
+  dasm_encode(&state, f);
+  dasm_free(&state);
+  mprotect(m, size, PROT_EXEC | PROT_READ);
+
+  return(f);
+}
+
+long long int (*fptr)(long long int *o,long long int *p,long long int *q,long long int b);
+int savecodes[NUMINSTRUCTIONS]; // for tracking bestcycles
+
+void softasm_setup(int codes[NUMINSTRUCTIONS]) {
+  fptr = softasm(codes);
+  if(fptr==NULL) ERROREXIT("FATAL ERROR: fptr %d...\n",codes[0]);
+  for(int i=0;i<NUMINSTRUCTIONS;i++) savecodes[i]=codes[i];
+}
+
+void softasm_cleanup() {
+  void *m = (char *)fptr - sizeof(size_t);
+  munmap(m, *(size_t*)m);
+}	    
