@@ -20,7 +20,8 @@ Run with no arguments to get a summary of command-line parameters.  You can use 
 * Seeds 50100-50199 for batches of 100 runs (with I=75k and I=2M)
 * Seeds 50101-50130 for batches of 30 runs (with I=100M)
 * Seeds 50101-50110, with numruns 500 each, for the TIS-100 Image Test Pattern 2 results.
-For example, with Delayed Acceptance, Integer Sqrt succeeds at I=2M; to reproduce these results obtain the integer-sqrt.tsv file from ../benchmarks/ and run:
+
+For example, with Delayed Acceptance, Integer Sqrt first succeeds at I=2M; to reproduce these results obtain the integer-sqrt.tsv file from ../benchmarks/ and run:
 ```
 makespeare-x86-64 501xx integer-sqrt.tsv 2.0 0.0 1.0 0.0 2000000 9
 ```
@@ -40,17 +41,6 @@ where LUAJITDIR is the location of your LuaJIT directory as configured in the Ma
 
 While most parameters are on the command line, the TIS-100 version has a compile-time parameter NUMIMMEDIATECONSTANTS in softasm.dasc - this can be set to the values for P listed in Table 2 of the MAKESPEARE AAAI paper.
 
-While most recent Intel or AMD CPUs should be able to run the code, the experiments were run on Intel i7-6700 CPUs (Skylake), and it is possible this detail matters if you need to exactly reproduce the MAKESPEARE AAAI paper's results.  Synthesized programs can leverage the semantics of the underlying hardware, and could possible use undefined/undocumented features (e.g. the values of flags after IMUL) that could change between versions of the CPU.  
+While most recent Intel or AMD CPUs should be able to run the code, the experiments in the MAKESPEARE AAAI paper were run on Intel i7-6700 CPUs (Skylake), and it is possible this detail may matter if you need to exactly reproduce the paper's x86-64 results.  Synthesized programs can leverage the semantics of the underlying hardware, and could possibly use undefined/undocumented features (e.g. the values of flags after IMUL) that could change between versions of the CPU.  
 
-It is recommended that you run MAKESPEARE within a protected environment, e.g. using firejail <https://firejail.wordpress.com/>.  MAKESPEARE compiles and runs many random programs, and if there's any bug causing failure of MAKESPEARE's internal protections it could be possible for a generated program to trigger system calls with unwanted effects.
-
-
-
-
-
-
-
-
-
-
-
+It is recommended that you run MAKESPEARE within a protected environment, e.g. using firejail <https://firejail.wordpress.com/>.  MAKESPEARE compiles and runs many random programs, and if there's any issue causing failure of MAKESPEARE's internal protections it could be possible for a generated program to trigger unwanted side-effects.
