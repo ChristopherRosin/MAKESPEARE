@@ -1,6 +1,6 @@
 # MAKESPEARE/scripts
 
-converter-synthesis-suite.pl is a Perl script for converting the 7 "Established Benchmarks" used in the paper to the format required by MAKESPEARE.  These benchmarks were described in this paper:
+converter-synthesis-suite.pl is a Perl script for converting the 7 "Established Benchmarks" used in the MAKESPEARE paper to the required format.  These benchmarks were described in this paper:
 
 *Helmuth, T., and Spector, L. 2015b. General program synthesis benchmark suite. In GECCO, 1039–1046.*
 
