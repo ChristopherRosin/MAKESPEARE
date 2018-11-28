@@ -27,6 +27,8 @@ makespeare-x86-64 501xx integer-sqrt.tsv 2.0 0.0 1.0 0.0 2000000 9
 ```
 for each xx=00 to 99.  
 
+The code is single-threaded, and you can run multiple seeds in parallel (e.g. one per available core or hyperthread) by running multiple instances of MAKESPEARE. 
+
 For the x86-64 benchmarks, the TSV input format has one example per line, with tab-separated fields.  See the header of the ../benchmarks/ TSV files for a listing of the fields.  The first field is 0 for training set, 1 for test set.  The input memory array is a white-space separated list of integers contained in a single field, as is the output memory array.
 
 The input file format for makespeare-tis100 is a sequence of 540 whitespace-separated integers in {0,1,2,3}.  
