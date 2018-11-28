@@ -1,6 +1,7 @@
 # MAKESPEARE
 
 Copyright 2018 Christopher D. Rosin
+Contact: christopher.rosin@gmail.com
 
 Code and data for the MAKESPEARE AAAI paper:
 
